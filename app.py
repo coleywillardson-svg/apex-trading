@@ -227,13 +227,55 @@ def score_setup(trend, choch, divergences, squeeze, adx_val, vol_ratio):
 
     return score, grade, signals
 
+def calculate_options_details(current_price, direction, target_1, stop_loss, atr, days_out=45):
+    import math
+    sigma = 0.35
+    T = days_out / 365
+
+    if direction == 'long':
+        # Strike just above current price — NOT at the target
+        strike = round((current_price * 1.03) / 5) * 5
+        if strike <= current_price:
+            strike += 5
+        option_type = 'Call'
+        moneyness   = max(0, (strike - current_price) / current_price)
+        premium     = round(0.4 * current_price * sigma * math.sqrt(T) * max(0.45, 1 - moneyness * 4), 2)
+        break_even  = round(strike + premium, 2)
+        pct_to_be   = round((break_even - current_price) / current_price * 100, 1)
+        exit_note   = f'Exit option if stock closes below ${stop_loss}'
+    else:
+        strike = round((current_price * 0.97) / 5) * 5
+        if strike >= current_price:
+            strike -= 5
+        option_type = 'Put'
+        moneyness   = max(0, (current_price - strike) / current_price)
+        premium     = round(0.4 * current_price * sigma * math.sqrt(T) * max(0.45, 1 - moneyness * 4), 2)
+        break_even  = round(strike - premium, 2)
+        pct_to_be   = round((current_price - break_even) / current_price * 100, 1)
+        exit_note   = f'Exit option if stock closes above ${stop_loss}'
+
+    expiry       = (datetime.now() + timedelta(days=days_out)).strftime('%B %Y')
+    per_contract = round(premium * 100, 2)
+    stop_pct     = round(abs(current_price - stop_loss) / current_price * 100, 1)
+
+    return {
+        'label':             f'{expiry} ${strike} {option_type}',
+        'option_type':       option_type,
+        'strike':            strike,
+        'expiry':            expiry,
+        'premium':           premium,
+        'per_contract':      per_contract,
+        'break_even':        break_even,
+        'pct_to_breakeven':  pct_to_be,
+        'max_risk_contract': f'${per_contract:.0f}',
+        'exit_note':         f'{exit_note} (−{stop_pct}% from current price)',
+    }
 
 def generate_setup(ticker, df, direction, setup_type, confidence, grade, signals):
     price = float(df['Close'].iloc[-1])
     atr   = float((df['High'] - df['Low']).rolling(14).mean().iloc[-1])
-
-    sh = find_swing_highs(df['High'].values.flatten())
-    sl = find_swing_lows(df['Low'].values.flatten())
+    sh    = find_swing_highs(df['High'].values.flatten())
+    sl    = find_swing_lows(df['Low'].values.flatten())
 
     if direction == 'long':
         entry_low  = round(price * 0.998, 2)
@@ -250,28 +292,38 @@ def generate_setup(ticker, df, direction, setup_type, confidence, grade, signals
         target_1   = round(entry_low - risk * 2.0, 2)
         target_2   = round(entry_low - risk * 3.5, 2)
 
-    rr     = round(abs(target_1 - entry_high) / (abs(entry_high - stop_loss) + 1e-10), 1)
-    strike = round(target_1 / 5) * 5
-    opt    = 'Calls' if direction == 'long' else 'Puts'
-    expiry = (datetime.now() + timedelta(days=45)).strftime('%B %Y')
+    rr = round(abs(target_1 - entry_high) / (abs(entry_high - stop_loss) + 1e-10), 1)
+
+    # Remove contradictory signals — don't show bearish signals on a long setup
+    clean_signals = []
+    for sig in signals:
+        if direction == 'long'  and 'Bearish' in sig and 'CHoCH' not in sig:
+            continue
+        if direction == 'short' and 'Bullish' in sig and 'CHoCH' not in sig:
+            continue
+        clean_signals.append(sig)
+
+    od = calculate_options_details(price, direction, target_1, stop_loss, atr, days_out=45)
 
     return {
-        'ticker':        ticker,
-        'setup_type':    setup_type,
-        'direction':     direction,
-        'confidence':    confidence,
-        'grade':         grade,
-        'current_price': price,
-        'entry_low':     entry_low,
-        'entry_high':    entry_high,
-        'stop_loss':     stop_loss,
-        'target_1':      target_1,
-        'target_2':      target_2,
-        'risk_reward':   rr,
-        'signals':       signals,
-        'options':       f'{expiry} ${strike} {opt}',
-        'atr':           round(atr, 2),
+        'ticker':          ticker,
+        'setup_type':      setup_type,
+        'direction':       direction,
+        'confidence':      confidence,
+        'grade':           grade,
+        'current_price':   price,
+        'entry_low':       entry_low,
+        'entry_high':      entry_high,
+        'stop_loss':       stop_loss,
+        'target_1':        target_1,
+        'target_2':        target_2,
+        'risk_reward':     rr,
+        'signals':         clean_signals,
+        'options':         od['label'],
+        'options_details': od,
+        'atr':             round(atr, 2),
     }
+
 
 
 def analyze_ticker(ticker, period='6mo', interval='1d'):
@@ -642,31 +694,60 @@ def main():
                              f"Conf {s['confidence']}/100  |  R:R {s['risk_reward']}:1")
 
                     with st.expander(label):
-                        col1, col2, col3 = st.columns(3)
 
-                        col1.markdown("**Entry Zone**")
-                        col1.markdown(f"`${s['entry_low']} – ${s['entry_high']}`")
-                        col1.markdown("**Stop Loss**")
-                        col1.markdown(f"🔴 `${s['stop_loss']}`")
+    # ── Stock Trade Plan ──────────────────────
+    st.markdown("##### 📊 Stock Trade Plan")
+    sc1, sc2, sc3 = st.columns(3)
 
-                        col2.markdown("**Target 1**")
-                        col2.markdown(f"🟢 `${s['target_1']}`")
-                        col2.markdown("**Target 2**")
-                        col2.markdown(f"🟢 `${s['target_2']}`")
+    sc1.markdown("**Entry Zone**")
+    sc1.code(f"${s['entry_low']} – ${s['entry_high']}")
+    sc1.markdown("**Stop Loss**")
+    sc1.markdown(f"🔴 `${s['stop_loss']}`")
+    sc1.caption(f"Risk from entry: {round(abs(s['entry_high'] - s['stop_loss']) / s['current_price'] * 100, 1)}%")
 
-                        col3.markdown("**Options Idea**")
-                        col3.markdown(f"📋 {s['options']}")
-                        col3.markdown("**Risk / Reward**")
-                        col3.markdown(f"⚖️ {s['risk_reward']} : 1")
+    sc2.markdown("**Target 1**")
+    sc2.markdown(f"🟢 `${s['target_1']}`")
+    sc2.markdown("**Target 2**")
+    sc2.markdown(f"🟢 `${s['target_2']}`")
+    sc2.caption(f"Move needed to T1: {round(abs(s['target_1'] - s['current_price']) / s['current_price'] * 100, 1)}%")
 
-                        st.markdown("**Signals Detected:**  " +
-                                    "  ·  ".join(s['signals']))
+    sc3.markdown("**Risk / Reward**")
+    sc3.markdown(f"⚖️ `{s['risk_reward']} : 1`")
+    sc3.markdown("**Current Price**")
+    sc3.markdown(f"💲 `${s['current_price']}`")
 
-                        if st.button(f"Open Chart → {s['ticker']}",
-                                     key=f"btn_{s['ticker']}_{rank}"):
-                            st.session_state['chart_ticker'] = s['ticker']
-                            st.session_state['chart_setup']  = s
-                            st.rerun()
+    # ── Options Trade Plan ────────────────────
+    if 'options_details' in s:
+        od = s['options_details']
+        st.divider()
+        st.markdown("##### 📋 Options Strategy")
+
+        oc1, oc2, oc3, oc4 = st.columns(4)
+        oc1.metric("Contract",     od['label'])
+        oc2.metric("Est. Premium", f"${od['premium']} / share")
+        oc2.caption(f"≈ {od['max_risk_contract']} per contract (100 shares)")
+        oc3.metric("Break-even",   f"${od['break_even']}")
+        oc3.caption(f"Needs +{od['pct_to_breakeven']}% move to profit")
+        oc4.metric("Max Risk",     od['max_risk_contract'])
+        oc4.caption("per contract — this is ALL you can lose")
+
+        st.warning(
+            f"⚠️ **Options max loss = premium paid only — NOT the stock stop loss.**\n\n"
+            f"The stop loss above is for stock traders only. As an options buyer your "
+            f"downside is capped at the premium.\n\n"
+            f"📤 **When to exit:** {od['exit_note']}"
+        )
+
+    # ── Signals ───────────────────────────────
+    st.divider()
+    st.markdown("**🔎 Signals Detected:**  " + "  ·  ".join(s['signals']))
+
+    if st.button(f"Open Chart → {s['ticker']}",
+                 key=f"btn_{s['ticker']}_{rank}"):
+        st.session_state['chart_ticker'] = s['ticker']
+        st.session_state['chart_setup']  = s
+        st.rerun()
+
         else:
             st.info("Click **Run Scan** above to analyze your watchlist.")
 
