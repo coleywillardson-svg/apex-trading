@@ -270,6 +270,49 @@ def calculate_options_details(current_price, direction, target_1, stop_loss, atr
         'max_risk_contract': f'${per_contract:.0f}',
         'exit_note':         f'{exit_note} (−{stop_pct}% from current price)',
     }
+def calculate_options_details(current_price, direction, target_1, stop_loss, atr, days_out=45):
+    import math
+    sigma = 0.35
+    T = days_out / 365
+
+    if direction == 'long':
+        # Strike just above current price — NOT at the target
+        strike = round((current_price * 1.03) / 5) * 5
+        if strike <= current_price:
+            strike += 5
+        option_type = 'Call'
+        moneyness   = max(0, (strike - current_price) / current_price)
+        premium     = round(0.4 * current_price * sigma * math.sqrt(T) * max(0.45, 1 - moneyness * 4), 2)
+        break_even  = round(strike + premium, 2)
+        pct_to_be   = round((break_even - current_price) / current_price * 100, 1)
+        exit_note   = f'Exit option if stock closes below ${stop_loss}'
+    else:
+        strike = round((current_price * 0.97) / 5) * 5
+        if strike >= current_price:
+            strike -= 5
+        option_type = 'Put'
+        moneyness   = max(0, (current_price - strike) / current_price)
+        premium     = round(0.4 * current_price * sigma * math.sqrt(T) * max(0.45, 1 - moneyness * 4), 2)
+        break_even  = round(strike - premium, 2)
+        pct_to_be   = round((current_price - break_even) / current_price * 100, 1)
+        exit_note   = f'Exit option if stock closes above ${stop_loss}'
+
+    expiry       = (datetime.now() + timedelta(days=days_out)).strftime('%B %Y')
+    per_contract = round(premium * 100, 2)
+    stop_pct     = round(abs(current_price - stop_loss) / current_price * 100, 1)
+
+    return {
+        'label':             f'{expiry} ${strike} {option_type}',
+        'option_type':       option_type,
+        'strike':            strike,
+        'expiry':            expiry,
+        'premium':           premium,
+        'per_contract':      per_contract,
+        'break_even':        break_even,
+        'pct_to_breakeven':  pct_to_be,
+        'max_risk_contract': f'${per_contract:.0f}',
+        'exit_note':         f'{exit_note} (−{stop_pct}% from current price)',
+    }
 
 def generate_setup(ticker, df, direction, setup_type, confidence, grade, signals):
     price = float(df['Close'].iloc[-1])
@@ -747,6 +790,7 @@ def main():
         st.session_state['chart_ticker'] = s['ticker']
         st.session_state['chart_setup']  = s
         st.rerun()
+
 
         else:
             st.info("Click **Run Scan** above to analyze your watchlist.")
